@@ -1,14 +1,14 @@
 // Sonos Finder and Player
 // This script discovers Sonos devices on your network and plays a specific song
 
-use std::net::IpAddr;
-use reqwest::{Client, header};
-use xml::writer::{EventWriter, XmlEvent};
+use anyhow::Result;
 use futures::stream::{self, StreamExt};
 use regex::Regex;
+use reqwest::{header, Client};
+use std::net::IpAddr;
 use std::net::UdpSocket;
 use std::thread;
-use anyhow::Result;
+use xml::writer::{EventWriter, XmlEvent};
 
 // SSDP discovery message for UPnP devices
 const SSDP_ADDR: &str = "239.255.255.250:1900";
@@ -18,17 +18,20 @@ const SSDP_M_SEARCH: &str = "M-SEARCH * HTTP/1.1\r\n\
                              MX: 3\r\n\
                              ST: urn:schemas-upnp-org:device:ZonePlayer:1\r\n\r\n";
 
-
+use chrono::{DateTime, Duration, Utc};
 use clap::{Parser, Subcommand};
 use octocrab::Octocrab;
-use chrono::{DateTime, Utc, Duration};
 use std::sync::{Arc, Mutex};
 
 // Import tokio for async runtime
 use tokio::time;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Control Sonos speakers and monitor GitHub CI")]
+#[command(
+    author,
+    version,
+    about = "Control Sonos speakers and monitor GitHub CI"
+)]
 struct SonosController {
     #[command(subcommand)]
     command: Commands,
@@ -114,8 +117,10 @@ async fn start_music(track_uri: &str, tracker: Arc<Mutex<LastPlayedTracker>>) ->
     if !can_play {
         let minutes = wait_time.unwrap().as_secs() / 60;
         let seconds = wait_time.unwrap().as_secs() % 60;
-        println!("Music was recently played. Please wait {}m {}s before playing again.",
-                 minutes, seconds);
+        println!(
+            "Music was recently played. Please wait {}m {}s before playing again.",
+            minutes, seconds
+        );
         return Ok(());
     }
 
@@ -129,11 +134,16 @@ async fn start_music(track_uri: &str, tracker: Arc<Mutex<LastPlayedTracker>>) ->
 
     println!("Found {} Sonos devices:", sonos_ips.len());
     for (i, ip) in sonos_ips.iter().enumerate() {
-        let device_info = get_device_info(ip).await.unwrap_or_else(|_| format!("Unknown Device at {}", ip));
-        println!("[{}] {}", i+1, device_info);
+        let device_info = get_device_info(ip)
+            .await
+            .unwrap_or_else(|_| format!("Unknown Device at {}", ip));
+        println!("[{}] {}", i + 1, device_info);
     }
 
-    println!("Playing music on all {} discovered speakers...", sonos_ips.len());
+    println!(
+        "Playing music on all {} discovered speakers...",
+        sonos_ips.len()
+    );
 
     let mut tasks = Vec::new();
     for ip in &sonos_ips {
@@ -168,13 +178,18 @@ async fn check_github_ci(repo: &str, branch: &str) -> Result<bool> {
     // Parse owner and repo name
     let parts: Vec<&str> = repo.split('/').collect();
     if parts.len() != 2 {
-        return Err(anyhow::anyhow!("Invalid repository format. Use 'owner/repo'"));
+        return Err(anyhow::anyhow!(
+            "Invalid repository format. Use 'owner/repo'"
+        ));
     }
 
     let owner = parts[0];
     let repo_name = parts[1];
 
-    println!("Checking CI status for {}/{} on branch {}", owner, repo_name, branch);
+    println!(
+        "Checking CI status for {}/{} on branch {}",
+        owner, repo_name, branch
+    );
 
     // Initialize GitHub client
     let octocrab = match std::env::var("GITHUB_ACTIONS_TOKEN") {
@@ -203,13 +218,12 @@ async fn check_github_ci(repo: &str, branch: &str) -> Result<bool> {
         let is_recent = now.signed_duration_since(created_at) < Duration::minutes(20);
         let is_in_progress = run.status == "in_progress" || run.status == "queued";
 
-        println!("Latest run ID: {}, Status: {}, Created: {}",
-            run.id,
-            run.status,
-            run.created_at
+        println!(
+            "Latest run ID: {}, Status: {}, Created: {}",
+            run.id, run.status, run.created_at
         );
 
-        if is_recent &&is_in_progress {
+        if is_recent && is_in_progress {
             println!("Found a recently triggered CI pipeline!");
             return Ok(true);
         }
@@ -230,14 +244,17 @@ async fn main() -> Result<()> {
     match &cli.command {
         Commands::Kill => kill_music().await?,
         Commands::Start { track } => {
-            let track_uri = track.clone().unwrap_or_else(||
-                "x-sonos-spotify:spotify:track:4LiJE6pqgsTX3FtukW6bNh?sid=9&flags=8224&sn=7".to_string()
-            );
+            let track_uri = track.clone().unwrap_or_else(|| {
+                "x-sonos-spotify:spotify:track:4LiJE6pqgsTX3FtukW6bNh?sid=9&flags=8224&sn=7"
+                    .to_string()
+            });
             start_music(&track_uri, tracker.clone()).await?
-        },
-        Commands::Listen { repo, branch, interval } => {
-            listen_to_ci(repo, branch, *interval, tracker.clone()).await?
-        },
+        }
+        Commands::Listen {
+            repo,
+            branch,
+            interval,
+        } => listen_to_ci(repo, branch, *interval, tracker.clone()).await?,
     }
 
     Ok(())
@@ -276,7 +293,12 @@ async fn kill_music() -> Result<()> {
 }
 
 // Listen to CI implementation
-async fn listen_to_ci(repo: &str, branch: &str, interval: u64, tracker: Arc<Mutex<LastPlayedTracker>>) -> Result<()> {
+async fn listen_to_ci(
+    repo: &str,
+    branch: &str,
+    interval: u64,
+    tracker: Arc<Mutex<LastPlayedTracker>>,
+) -> Result<()> {
     println!("Monitoring GitHub CI pipeline for {repo} on branch {branch}");
     println!("Checking every {interval} seconds");
 
@@ -284,7 +306,11 @@ async fn listen_to_ci(repo: &str, branch: &str, interval: u64, tracker: Arc<Mute
         match check_github_ci(repo, branch).await {
             Ok(true) => {
                 println!("CI trigger detected! Starting music...");
-                start_music("x-sonos-spotify:spotify:track:4LiJE6pqgsTX3FtukW6bNh?sid=9&flags=8224&sn=7", tracker.clone()).await?;
+                start_music(
+                    "x-sonos-spotify:spotify:track:4LiJE6pqgsTX3FtukW6bNh?sid=9&flags=8224&sn=7",
+                    tracker.clone(),
+                )
+                .await?;
             }
             Ok(false) => {
                 println!("No CI trigger detected. Waiting {} seconds...", interval);
@@ -364,7 +390,7 @@ async fn discover_sonos_devices() -> Result<Vec<String>> {
                             }
                         }
                         None
-                    },
+                    }
                     Err(_) => None,
                 }
             });
@@ -408,18 +434,24 @@ async fn get_device_info(ip: &str) -> Result<String> {
     let client = Client::new();
     let url = format!("http://{}:1400/xml/device_description.xml", ip);
 
-    let resp = client.get(&url).timeout(std::time::Duration::from_secs(2)).send().await?;
+    let resp = client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await?;
     let text = resp.text().await?;
 
     // Extract device name and model using regex (simple approach)
     let name_re = Regex::new(r"<roomName>([^<]+)</roomName>").unwrap();
     let model_re = Regex::new(r"<displayName>([^<]+)</displayName>").unwrap();
 
-    let name = name_re.captures(&text)
+    let name = name_re
+        .captures(&text)
         .and_then(|cap| cap.get(1))
         .map_or("Unknown", |m| m.as_str());
 
-    let model = model_re.captures(&text)
+    let model = model_re
+        .captures(&text)
         .and_then(|cap| cap.get(1))
         .map_or("Unknown", |m| m.as_str());
 
@@ -447,9 +479,16 @@ async fn set_av_transport_uri(ip: &str, track_uri: &str) -> Result<()> {
         let mut xml_writer = EventWriter::new(&mut writer);
 
         // Start SOAP envelope
-        xml_writer.write(XmlEvent::start_element("s:Envelope")
-            .attr("xmlns:s", "http://schemas.xmlsoap.org/soap/envelope/")
-            .attr("s:encodingStyle", "http://schemas.xmlsoap.org/soap/encoding/")).unwrap();
+        xml_writer
+            .write(
+                XmlEvent::start_element("s:Envelope")
+                    .attr("xmlns:s", "http://schemas.xmlsoap.org/soap/envelope/")
+                    .attr(
+                        "s:encodingStyle",
+                        "http://schemas.xmlsoap.org/soap/encoding/",
+                    ),
+            )
+            .unwrap();
 
         // SOAP body
         xml_writer.write(XmlEvent::start_element("s:Body")).unwrap();
@@ -457,19 +496,28 @@ async fn set_av_transport_uri(ip: &str, track_uri: &str) -> Result<()> {
         // Action
         let action_name = format!("u:{}", action);
         let namespace = format!("urn:schemas-upnp-org:service:{}:1", service);
-        xml_writer.write(XmlEvent::start_element(action_name.as_str())
-            .attr("xmlns:u", namespace.as_str())).unwrap();
+        xml_writer
+            .write(
+                XmlEvent::start_element(action_name.as_str()).attr("xmlns:u", namespace.as_str()),
+            )
+            .unwrap();
 
         // Parameters
-        xml_writer.write(XmlEvent::start_element("InstanceID")).unwrap();
+        xml_writer
+            .write(XmlEvent::start_element("InstanceID"))
+            .unwrap();
         xml_writer.write(XmlEvent::Characters("0")).unwrap();
         xml_writer.write(XmlEvent::end_element()).unwrap();
 
-        xml_writer.write(XmlEvent::start_element("CurrentURI")).unwrap();
+        xml_writer
+            .write(XmlEvent::start_element("CurrentURI"))
+            .unwrap();
         xml_writer.write(XmlEvent::Characters(track_uri)).unwrap();
         xml_writer.write(XmlEvent::end_element()).unwrap();
 
-        xml_writer.write(XmlEvent::start_element("CurrentURIMetaData")).unwrap();
+        xml_writer
+            .write(XmlEvent::start_element("CurrentURIMetaData"))
+            .unwrap();
         xml_writer.write(XmlEvent::Characters("")).unwrap();
         xml_writer.write(XmlEvent::end_element()).unwrap();
 
@@ -486,15 +534,19 @@ async fn set_av_transport_uri(ip: &str, track_uri: &str) -> Result<()> {
     let url = format!("http://{}:1400/MediaRenderer/AVTransport/Control", ip);
 
     let mut headers = header::HeaderMap::new();
-    headers.insert("Content-Type", header::HeaderValue::from_static("text/xml; charset=\"utf-8\""));
-    headers.insert("SOAPAction", header::HeaderValue::from_str(
-        &format!("\"urn:schemas-upnp-org:service:{}:1#{}\"", service, action))?);
+    headers.insert(
+        "Content-Type",
+        header::HeaderValue::from_static("text/xml; charset=\"utf-8\""),
+    );
+    headers.insert(
+        "SOAPAction",
+        header::HeaderValue::from_str(&format!(
+            "\"urn:schemas-upnp-org:service:{}:1#{}\"",
+            service, action
+        ))?,
+    );
 
-    let resp = client.post(&url)
-        .headers(headers)
-        .body(body)
-        .send()
-        .await?;
+    let resp = client.post(&url).headers(headers).body(body).send().await?;
 
     if !resp.status().is_success() {
         println!("Error setting track URI. Status: {}", resp.status());
@@ -516,9 +568,16 @@ async fn play(ip: &str) -> Result<()> {
         let mut xml_writer = EventWriter::new(&mut writer);
 
         // Start SOAP envelope
-        xml_writer.write(XmlEvent::start_element("s:Envelope")
-            .attr("xmlns:s", "http://schemas.xmlsoap.org/soap/envelope/")
-            .attr("s:encodingStyle", "http://schemas.xmlsoap.org/soap/encoding/")).unwrap();
+        xml_writer
+            .write(
+                XmlEvent::start_element("s:Envelope")
+                    .attr("xmlns:s", "http://schemas.xmlsoap.org/soap/envelope/")
+                    .attr(
+                        "s:encodingStyle",
+                        "http://schemas.xmlsoap.org/soap/encoding/",
+                    ),
+            )
+            .unwrap();
 
         // SOAP body
         xml_writer.write(XmlEvent::start_element("s:Body")).unwrap();
@@ -526,11 +585,16 @@ async fn play(ip: &str) -> Result<()> {
         // Action
         let action_name = format!("u:{}", action);
         let namespace = format!("urn:schemas-upnp-org:service:{}:1", service);
-        xml_writer.write(XmlEvent::start_element(action_name.as_str())
-            .attr("xmlns:u", namespace.as_str())).unwrap();
+        xml_writer
+            .write(
+                XmlEvent::start_element(action_name.as_str()).attr("xmlns:u", namespace.as_str()),
+            )
+            .unwrap();
 
         // Parameters
-        xml_writer.write(XmlEvent::start_element("InstanceID")).unwrap();
+        xml_writer
+            .write(XmlEvent::start_element("InstanceID"))
+            .unwrap();
         xml_writer.write(XmlEvent::Characters("0")).unwrap();
         xml_writer.write(XmlEvent::end_element()).unwrap();
 
@@ -551,15 +615,19 @@ async fn play(ip: &str) -> Result<()> {
     let url = format!("http://{}:1400/MediaRenderer/AVTransport/Control", ip);
 
     let mut headers = header::HeaderMap::new();
-    headers.insert("Content-Type", header::HeaderValue::from_static("text/xml; charset=\"utf-8\""));
-    headers.insert("SOAPAction", header::HeaderValue::from_str(
-        &format!("\"urn:schemas-upnp-org:service:{}:1#{}\"", service, action))?);
+    headers.insert(
+        "Content-Type",
+        header::HeaderValue::from_static("text/xml; charset=\"utf-8\""),
+    );
+    headers.insert(
+        "SOAPAction",
+        header::HeaderValue::from_str(&format!(
+            "\"urn:schemas-upnp-org:service:{}:1#{}\"",
+            service, action
+        ))?,
+    );
 
-    let resp = client.post(&url)
-        .headers(headers)
-        .body(body)
-        .send()
-        .await?;
+    let resp = client.post(&url).headers(headers).body(body).send().await?;
 
     if !resp.status().is_success() {
         println!("Error playing track. Status: {}", resp.status());
@@ -582,9 +650,16 @@ async fn stop_playback(ip: &str) -> Result<()> {
         let mut xml_writer = EventWriter::new(&mut writer);
 
         // Start SOAP envelope
-        xml_writer.write(XmlEvent::start_element("s:Envelope")
-            .attr("xmlns:s", "http://schemas.xmlsoap.org/soap/envelope/")
-            .attr("s:encodingStyle", "http://schemas.xmlsoap.org/soap/encoding/")).unwrap();
+        xml_writer
+            .write(
+                XmlEvent::start_element("s:Envelope")
+                    .attr("xmlns:s", "http://schemas.xmlsoap.org/soap/envelope/")
+                    .attr(
+                        "s:encodingStyle",
+                        "http://schemas.xmlsoap.org/soap/encoding/",
+                    ),
+            )
+            .unwrap();
 
         // SOAP body
         xml_writer.write(XmlEvent::start_element("s:Body")).unwrap();
@@ -592,11 +667,16 @@ async fn stop_playback(ip: &str) -> Result<()> {
         // Action
         let action_name = format!("u:{}", action);
         let namespace = format!("urn:schemas-upnp-org:service:{}:1", service);
-        xml_writer.write(XmlEvent::start_element(action_name.as_str())
-            .attr("xmlns:u", namespace.as_str())).unwrap();
+        xml_writer
+            .write(
+                XmlEvent::start_element(action_name.as_str()).attr("xmlns:u", namespace.as_str()),
+            )
+            .unwrap();
 
         // Parameters
-        xml_writer.write(XmlEvent::start_element("InstanceID")).unwrap();
+        xml_writer
+            .write(XmlEvent::start_element("InstanceID"))
+            .unwrap();
         xml_writer.write(XmlEvent::Characters("0")).unwrap();
         xml_writer.write(XmlEvent::end_element()).unwrap();
 
@@ -613,15 +693,19 @@ async fn stop_playback(ip: &str) -> Result<()> {
     let url = format!("http://{}:1400/MediaRenderer/AVTransport/Control", ip);
 
     let mut headers = header::HeaderMap::new();
-    headers.insert("Content-Type", header::HeaderValue::from_static("text/xml; charset=\"utf-8\""));
-    headers.insert("SOAPAction", header::HeaderValue::from_str(
-        &format!("\"urn:schemas-upnp-org:service:{}:1#{}\"", service, action))?);
+    headers.insert(
+        "Content-Type",
+        header::HeaderValue::from_static("text/xml; charset=\"utf-8\""),
+    );
+    headers.insert(
+        "SOAPAction",
+        header::HeaderValue::from_str(&format!(
+            "\"urn:schemas-upnp-org:service:{}:1#{}\"",
+            service, action
+        ))?,
+    );
 
-    let resp = client.post(&url)
-        .headers(headers)
-        .body(body)
-        .send()
-        .await?;
+    let resp = client.post(&url).headers(headers).body(body).send().await?;
 
     if !resp.status().is_success() {
         println!("Error stopping playback. Status: {}", resp.status());

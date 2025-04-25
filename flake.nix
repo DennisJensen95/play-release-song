@@ -96,9 +96,9 @@
             ];
             config = {
               Entrypoint = [ "${rustPackage}/bin/${pname}" ];
-              Env = [];
+              Env = [ ];
               ExposedPorts = {
-                "8080/tcp" = {};
+                "8080/tcp" = { };
               };
             };
           };
@@ -120,7 +120,8 @@
             pkgs.darwin.apple_sdk.frameworks.Foundation
           ];
 
-        in {
+        in
+        {
           # Development shell configuration
           devshells.default = {
             packages = commonBuildInputs
