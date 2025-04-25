@@ -62,7 +62,7 @@
           ##########
           # Common #
           ##########
-          pname = "play-release-me";
+          pname = "play-release-song";
           version = "0.1.0";
 
           src = ./.;

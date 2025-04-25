@@ -1,13 +1,21 @@
 // Sonos Finder and Player
 // This script discovers Sonos devices on your network and plays a specific song
 
-use anyhow::Result;
+// STD
 use futures::stream::{self, StreamExt};
-use regex::Regex;
-use reqwest::{header, Client};
 use std::net::IpAddr;
 use std::net::UdpSocket;
+use std::sync::{Arc, Mutex};
 use std::thread;
+
+// TPM
+use anyhow::Result;
+use chrono::{DateTime, Duration, Utc};
+use clap::{Parser, Subcommand};
+use octocrab::Octocrab;
+use regex::Regex;
+use reqwest::{header, Client};
+use tokio::time;
 use xml::writer::{EventWriter, XmlEvent};
 
 // SSDP discovery message for UPnP devices
@@ -17,14 +25,6 @@ const SSDP_M_SEARCH: &str = "M-SEARCH * HTTP/1.1\r\n\
                              MAN: \"ssdp:discover\"\r\n\
                              MX: 3\r\n\
                              ST: urn:schemas-upnp-org:device:ZonePlayer:1\r\n\r\n";
-
-use chrono::{DateTime, Duration, Utc};
-use clap::{Parser, Subcommand};
-use octocrab::Octocrab;
-use std::sync::{Arc, Mutex};
-
-// Import tokio for async runtime
-use tokio::time;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -209,7 +209,7 @@ async fn check_github_ci(repo: &str, branch: &str) -> Result<bool> {
         .await?;
 
     // Check if there are any runs
-    for run in runs.items {
+    if let Some(run) = runs.items.into_iter().next() {
         // Parse run creation time
         let created_at: DateTime<Utc> = run.created_at;
         let now = Utc::now();
@@ -227,8 +227,6 @@ async fn check_github_ci(repo: &str, branch: &str) -> Result<bool> {
             println!("Found a recently triggered CI pipeline!");
             return Ok(true);
         }
-
-        break;
     }
 
     Ok(false)
@@ -402,10 +400,8 @@ async fn discover_sonos_devices() -> Result<Vec<String>> {
             .collect::<Vec<_>>()
             .await;
 
-        for result in results {
-            if let Some(ip) = result {
-                sonos_ips.push(ip);
-            }
+        for ip in results.into_iter().flatten() {
+            sonos_ips.push(ip);
         }
     }
 
@@ -714,4 +710,15 @@ async fn stop_playback(ip: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+pub mod test {
+    #[test]
+    fn test_vibe_coded_no_test() {
+        assert_eq!(
+            "Does software really need to work always? 😂",
+            "Does software really need to work always? 😂"
+        )
+    }
 }
