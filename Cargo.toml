@@ -1,0 +1,23 @@
+[package]
+name = "play-release-me"
+version = "0.1.0"
+edition = "2021"
+authors = ["Dennis Jensen <dennis.jensen@digitalthaandvaerk.dk>"]
+description = "An app that plays songs on Sonos"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.11", features = ["json"] }
+futures = "0.3"
+xml-rs = "0.8"
+regex = "1.5"
+clap = { version = "4.5.37", features = ["derive"] }
+octocrab = "0.32"
+chrono = "0.4"
+anyhow = "1.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
