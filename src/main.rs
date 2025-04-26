@@ -102,7 +102,7 @@ impl LastPlayedTracker {
     }
 }
 
-// Modified start_music function with cooldown tracking
+// Modified start_music function with cooldown tracking and speaker grouping
 async fn start_music(track_uri: &str, tracker: Arc<Mutex<LastPlayedTracker>>) -> Result<()> {
     // Check if we can play now based on the cooldown
     let can_play;
@@ -140,31 +140,49 @@ async fn start_music(track_uri: &str, tracker: Arc<Mutex<LastPlayedTracker>>) ->
         println!("[{}] {}", i + 1, device_info);
     }
 
-    println!(
-        "Playing music on all {} discovered speakers...",
-        sonos_ips.len()
-    );
+    // Select the first speaker as the coordinator
+    let coordinator_ip = sonos_ips[0].clone();
+    let member_ips: Vec<String> = sonos_ips.iter().skip(1).cloned().collect();
 
-    let mut tasks = Vec::new();
-    for ip in &sonos_ips {
-        println!("Sending play command to {}", ip);
-        let ip_clone = ip.clone();
-        let track_uri_clone = track_uri.to_string();
-        tasks.push(tokio::spawn(async move {
-            match play_track(&ip_clone, &track_uri_clone).await {
-                Ok(_) => println!("Successfully sent command to {}", ip_clone),
-                Err(e) => println!("Failed to send command to {}: {}", ip_clone, e),
+    // Group speakers if there are multiple
+    if !member_ips.is_empty() {
+        println!(
+            "Grouping {} speakers with coordinator {}...",
+            member_ips.len() + 1,
+            coordinator_ip
+        );
+        match group_speakers(&coordinator_ip, &member_ips).await {
+            Ok(_) => println!("Speakers grouped successfully."),
+            Err(e) => {
+                println!(
+                    "Failed to group speakers: {}. Proceeding without grouping.",
+                    e
+                );
+                // Optionally, decide if you want to stop here or try playing on all individually
+                // For now, we'll proceed to play on the coordinator only
             }
-        }));
+        }
+        // Add a small delay to allow grouping to settle
+        time::sleep(std::time::Duration::from_secs(1)).await;
     }
 
-    // Await all tasks to complete
-    for task in tasks {
-        let _ = task.await;
-    }
-    println!("All play commands completed");
+    println!("Playing music on coordinator speaker {}...", coordinator_ip);
 
-    // Mark as played after successful playback
+    // Send play command only to the coordinator
+    match play_track(&coordinator_ip, track_uri).await {
+        Ok(_) => println!(
+            "Successfully sent play command to coordinator {}",
+            coordinator_ip
+        ),
+        Err(e) => println!(
+            "Failed to send play command to coordinator {}: {}",
+            coordinator_ip, e
+        ),
+    }
+
+    println!("Play command sent.");
+
+    // Mark as played after successful playback attempt
     {
         let mut tracker_guard = tracker.lock().unwrap();
         tracker_guard.mark_played();
@@ -455,10 +473,15 @@ async fn get_device_info(ip: &str) -> Result<String> {
 }
 
 async fn play_track(ip: &str, track_uri: &str) -> Result<()> {
-    // First, we need to set the URI of the track
+    // First, we need to set the URI of the track on the coordinator
+    println!("Setting track URI {} on {}", track_uri, ip);
     set_av_transport_uri(ip, track_uri).await?;
 
+    // Add a small delay between setting URI and playing
+    time::sleep(std::time::Duration::from_millis(500)).await;
+
     // Then we can play it
+    println!("Sending Play command to {}", ip);
     play(ip).await?;
 
     Ok(())
@@ -710,6 +733,31 @@ async fn stop_playback(ip: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn group_speakers(coordinator_ip: &str, member_ips: &[String]) -> Result<()> {
+    // For each member speaker, set AV transport to the coordinator's URL
+    for member_ip in member_ips {
+        let uri = format!("x-rincon:{}", get_speaker_uuid(coordinator_ip).await?);
+        set_av_transport_uri(member_ip, &uri).await?;
+    }
+    Ok(())
+}
+
+async fn get_speaker_uuid(ip: &str) -> Result<String> {
+    let client = Client::new();
+    let url = format!("http://{}:1400/xml/device_description.xml", ip);
+    let resp = client.get(&url).send().await?;
+    let text = resp.text().await?;
+
+    // Extract UUID using regex
+    let uuid_re = Regex::new(r"<UDN>uuid:([^<]+)</UDN>").unwrap();
+    if let Some(cap) = uuid_re.captures(&text) {
+        if let Some(uuid) = cap.get(1) {
+            return Ok(uuid.as_str().to_string());
+        }
+    }
+    Err(anyhow::anyhow!("Failed to get speaker UUID"))
 }
 
 #[cfg(test)]
