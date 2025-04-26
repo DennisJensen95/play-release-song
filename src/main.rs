@@ -102,7 +102,7 @@ impl LastPlayedTracker {
     }
 }
 
-// Modified start_music function with cooldown tracking and speaker grouping
+// Modified start_music function with cooldown tracking, calling kill_music, and speaker grouping
 async fn start_music(track_uri: &str, tracker: Arc<Mutex<LastPlayedTracker>>) -> Result<()> {
     // Check if we can play now based on the cooldown
     let can_play;
@@ -124,11 +124,23 @@ async fn start_music(track_uri: &str, tracker: Arc<Mutex<LastPlayedTracker>>) ->
         return Ok(());
     }
 
-    println!("Finding Sonos speakers on your network...");
+    println!("Preparing speakers: Stopping and ungrouping if necessary...");
+    // Call kill_music to stop and ungroup all speakers first
+    if let Err(e) = kill_music().await {
+        println!(
+            "Warning: Error during pre-start cleanup (kill_music): {}. Attempting to continue...",
+            e
+        );
+        // Decide if this error is critical. For now, we log and continue.
+    }
+    // Add a small delay after kill_music to ensure state settles
+    time::sleep(std::time::Duration::from_secs(2)).await;
+
+    println!("Finding Sonos speakers again after cleanup...");
     let sonos_ips = discover_sonos_devices().await?;
 
     if sonos_ips.is_empty() {
-        println!("No Sonos devices found.");
+        println!("No Sonos devices found after cleanup.");
         return Ok(());
     }
 
@@ -155,15 +167,16 @@ async fn start_music(track_uri: &str, tracker: Arc<Mutex<LastPlayedTracker>>) ->
             Ok(_) => println!("Speakers grouped successfully."),
             Err(e) => {
                 println!(
-                    "Failed to group speakers: {}. Proceeding without grouping.",
+                    "Failed to group speakers: {}. Proceeding to play on coordinator only.",
                     e
                 );
-                // Optionally, decide if you want to stop here or try playing on all individually
-                // For now, we'll proceed to play on the coordinator only
+                // If grouping fails, we still play on the coordinator
             }
         }
         // Add a small delay to allow grouping to settle
         time::sleep(std::time::Duration::from_secs(1)).await;
+    } else {
+        println!("Only one speaker found, no grouping needed.");
     }
 
     println!("Playing music on coordinator speaker {}...", coordinator_ip);
@@ -287,24 +300,33 @@ async fn kill_music() -> Result<()> {
     }
 
     println!("Stopping music on {} Sonos devices...", sonos_ips.len());
-
-    let mut stop_tasks = Vec::new();
-    for ip in &sonos_ips {
+    let stop_tasks = sonos_ips.iter().map(|ip| {
         let ip_clone = ip.clone();
-        stop_tasks.push(tokio::spawn(async move {
+        tokio::spawn(async move {
             match stop_playback(&ip_clone).await {
                 Ok(_) => println!("Successfully stopped playback on {}", ip_clone),
                 Err(e) => println!("Failed to stop playback on {}: {}", ip_clone, e),
             }
-        }));
-    }
+        })
+    });
+    futures::future::join_all(stop_tasks).await;
+    time::sleep(std::time::Duration::from_millis(500)).await; // Short delay
 
-    // Wait for all stop commands to complete
-    for task in stop_tasks {
-        let _ = task.await;
-    }
+    // --- Start: Added Ungroup ---
+    println!("Ungrouping all speakers...");
+    let ungroup_tasks = sonos_ips.iter().map(|ip| {
+        let ip_clone = ip.clone();
+        tokio::spawn(async move {
+            match become_standalone(&ip_clone).await {
+                Ok(_) => println!("Ungrouped (became standalone) {}", ip_clone),
+                Err(e) => println!("Failed to ungroup {}: {}", ip_clone, e),
+            }
+        })
+    });
+    futures::future::join_all(ungroup_tasks).await;
+    // --- End: Added Ungroup ---
 
-    println!("All speakers stopped!");
+    println!("All speakers stopped and ungrouped!");
     Ok(())
 }
 
@@ -735,29 +757,180 @@ async fn stop_playback(ip: &str) -> Result<()> {
     Ok(())
 }
 
-async fn group_speakers(coordinator_ip: &str, member_ips: &[String]) -> Result<()> {
-    // For each member speaker, set AV transport to the coordinator's URL
-    for member_ip in member_ips {
-        let uri = format!("x-rincon:{}", get_speaker_uuid(coordinator_ip).await?);
-        set_av_transport_uri(member_ip, &uri).await?;
+// Add this function to make a speaker leave its group and become standalone
+async fn become_standalone(ip: &str) -> Result<()> {
+    // The SOAP action for becoming standalone
+    let action = "BecomeCoordinatorOfStandaloneGroup";
+    let service = "AVTransport"; // This action is part of AVTransport
+
+    // Create the SOAP envelope
+    let mut writer = Vec::new();
+    {
+        let mut xml_writer = EventWriter::new(&mut writer);
+
+        // Start SOAP envelope
+        xml_writer
+            .write(
+                XmlEvent::start_element("s:Envelope")
+                    .attr("xmlns:s", "http://schemas.xmlsoap.org/soap/envelope/")
+                    .attr(
+                        "s:encodingStyle",
+                        "http://schemas.xmlsoap.org/soap/encoding/",
+                    ),
+            )
+            .unwrap();
+
+        // SOAP body
+        xml_writer.write(XmlEvent::start_element("s:Body")).unwrap();
+
+        // Action
+        let action_name = format!("u:{}", action);
+        let namespace = format!("urn:schemas-upnp-org:service:{}:1", service);
+        xml_writer
+            .write(
+                XmlEvent::start_element(action_name.as_str()).attr("xmlns:u", namespace.as_str()),
+            )
+            .unwrap();
+
+        // Parameters
+        xml_writer
+            .write(XmlEvent::start_element("InstanceID"))
+            .unwrap();
+        xml_writer.write(XmlEvent::Characters("0")).unwrap();
+        xml_writer.write(XmlEvent::end_element()).unwrap();
+
+        // Close tags
+        xml_writer.write(XmlEvent::end_element()).unwrap(); // u:action
+        xml_writer.write(XmlEvent::end_element()).unwrap(); // s:Body
+        xml_writer.write(XmlEvent::end_element()).unwrap(); // s:Envelope
     }
+
+    let body = String::from_utf8(writer)?;
+
+    // Create and send the HTTP request
+    let client = Client::new();
+    let url = format!("http://{}:1400/MediaRenderer/AVTransport/Control", ip);
+
+    let mut headers = header::HeaderMap::new();
+    headers.insert(
+        "Content-Type",
+        header::HeaderValue::from_static("text/xml; charset=\"utf-8\""),
+    );
+    headers.insert(
+        "SOAPAction",
+        header::HeaderValue::from_str(&format!(
+            "\"urn:schemas-upnp-org:service:{}:1#{}\"",
+            service, action
+        ))?,
+    );
+
+    // Add a timeout to the request
+    let resp = client
+        .post(&url)
+        .headers(headers)
+        .body(body)
+        .timeout(std::time::Duration::from_secs(5)) // 5 second timeout
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        // Sonos might return 500 if already standalone, treat this as non-fatal for ungrouping
+        if resp.status().as_u16() == 500 {
+            println!(
+                "Note: Received 500 error trying to ungroup {}, might already be standalone.",
+                ip
+            );
+            return Ok(()); // Treat 500 as potentially okay for this specific action
+        }
+        println!("Error making speaker standalone. Status: {}", resp.status());
+        println!("Response: {}", resp.text().await?);
+        return Err(anyhow::anyhow!("Failed to make speaker standalone"));
+    }
+
     Ok(())
 }
 
+async fn group_speakers(coordinator_ip: &str, member_ips: &[String]) -> Result<()> {
+    // Get coordinator UUID first
+    let coordinator_uuid = get_speaker_uuid(coordinator_ip).await?;
+    let coordinator_uri = format!("x-rincon:{}", coordinator_uuid);
+    println!("Coordinator {} UUID: {}", coordinator_ip, coordinator_uuid);
+
+    // For each member speaker, set AV transport to the coordinator's URI
+    let mut group_tasks = Vec::new();
+    for member_ip in member_ips {
+        println!(
+            "Adding {} to group coordinator {}",
+            member_ip, coordinator_ip
+        );
+        let member_ip_clone = member_ip.clone();
+        let uri_clone = coordinator_uri.clone();
+        group_tasks.push(tokio::spawn(async move {
+            match set_av_transport_uri(&member_ip_clone, &uri_clone).await {
+                Ok(_) => Ok(format!("Successfully grouped {}", member_ip_clone)),
+                Err(e) => Err(anyhow::anyhow!(
+                    "Failed to group {}: {}",
+                    member_ip_clone,
+                    e
+                )),
+            }
+        }));
+    }
+
+    // Wait for all grouping tasks and collect results
+    let results = futures::future::join_all(group_tasks).await;
+    let mut errors = Vec::new();
+    for result in results {
+        match result {
+            Ok(Ok(msg)) => println!("{}", msg), // Task succeeded, inner result Ok
+            Ok(Err(e)) => errors.push(e.to_string()), // Task succeeded, inner result Err
+            Err(e) => errors.push(format!("Grouping task failed: {}", e)), // Task panicked or cancelled
+        }
+    }
+
+    if !errors.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Errors occurred during grouping: {}",
+            errors.join(", ")
+        ));
+    }
+
+    Ok(())
+}
+
+// Add this function to get the speaker's UUID (UDN without the 'uuid:' prefix)
 async fn get_speaker_uuid(ip: &str) -> Result<String> {
     let client = Client::new();
     let url = format!("http://{}:1400/xml/device_description.xml", ip);
-    let resp = client.get(&url).send().await?;
+
+    let resp = client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(3)) // Add timeout
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        return Err(anyhow::anyhow!(
+            "Failed to get device description from {}. Status: {}",
+            ip,
+            resp.status()
+        ));
+    }
+
     let text = resp.text().await?;
 
-    // Extract UUID using regex
+    // Extract UUID (UDN) using regex
     let uuid_re = Regex::new(r"<UDN>uuid:([^<]+)</UDN>").unwrap();
     if let Some(cap) = uuid_re.captures(&text) {
         if let Some(uuid) = cap.get(1) {
             return Ok(uuid.as_str().to_string());
         }
     }
-    Err(anyhow::anyhow!("Failed to get speaker UUID"))
+
+    Err(anyhow::anyhow!(
+        "Failed to find speaker UUID (UDN) in description from {}",
+        ip
+    ))
 }
 
 #[cfg(test)]
