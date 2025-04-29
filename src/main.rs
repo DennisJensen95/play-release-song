@@ -63,6 +63,8 @@ enum Commands {
         #[arg(short, long, default_value = "60")]
         interval: u64,
     },
+    /// List all Sonos speakers on the network
+    List,
 }
 
 // Structure to track the last played time
@@ -284,6 +286,24 @@ async fn main() -> Result<()> {
             branch,
             interval,
         } => listen_to_ci(repo, branch, *interval, tracker.clone()).await?,
+        Commands::List => list_speakers().await?,
+    }
+
+    Ok(())
+}
+
+async fn list_speakers() -> Result<()> {
+    println!("Finding Sonos speakers on your network...");
+    let sonos_ips = discover_sonos_devices().await?;
+
+    if sonos_ips.is_empty() {
+        println!("No Sonos devices found.");
+        return Ok(());
+    }
+
+    println!("Found {} Sonos devices:", sonos_ips.len());
+    for (i, ip) in sonos_ips.iter().enumerate() {
+        println!("[{}] {}", i + 1, ip);
     }
 
     Ok(())
